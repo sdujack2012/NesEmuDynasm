@@ -1,0 +1,2068 @@
+/* 
+ * File:   CPU6502OpTranslator.cpp
+ * Author: Kai_Jiang
+ * 
+ * Created on July 23, 2015, 11:31 AM
+ */
+
+
+#include "CPU6502OpTranslator.h"
+#include "./dynasm/dasm_x86.h"
+
+|.arch x86
+|.globals lbl_
+|.actionlist bf_actions
+|.section code
+
+|.define A,ah
+|.define X,al
+|.define Y,bl
+|.define S,bh
+|.macro prologue
+    | mov A,[&A_backup]
+    | mov X,[&X_backup]
+	| mov Y,[&Y_backup]
+	| mov S,[&S_backup]
+|.endmacro
+
+|.macro epilogue
+    | mov [&A_backup], A
+    | mov [&X_backup], X
+	| mov [&Y_backup], Y
+	| mov [&S_backup], S
+|.endmacro
+
+|.macro addCycle,cycle
+	| add dword [&cycles],cycle
+|.endmacro
+
+|.macro interruptV
+	| cmp dword [&cycles], MAX_CYCLES
+	| jb >1
+	| call aword &this->doInterrupt
+	| mov dword [&cycles],0
+	| 1:
+|.endmacro
+
+|.macro BrkInterrupt
+	| pushWord pc+2
+	| mov  byte [&Interrupt_flag],1
+	| PHP
+	| epilogue
+	| mov ax,word [codeMemory+0xFFFE]
+	| ret
+|.endmacro
+
+|.macro interrupt, interruptVector
+	| pushWord pc+2
+	| PHP
+	| epilogue
+	| mov ax,word [codeMemory+interruptVector]
+	| ret
+|.endmacro
+
+
+
+//addressing mode
+
+|.macro prepareZeropage
+	|mov ecx,0
+	|mov cl,byte [codeMemory+(pc+1)]
+	|add ecx,aword codeMemory
+|.endmacro
+
+|.macro prepareZeropageX
+	|mov ecx,0
+	|mov cl,byte [codeMemory+(pc+1)]
+	|add cl,X
+	|add ecx,aword codeMemory
+|.endmacro
+
+|.macro prepareZeropageY
+	|mov ecx,0
+	|mov cl,byte [codeMemory+(pc+1)]
+	|add cl,Y
+	|add ecx,aword codeMemory
+|.endmacro
+
+|.macro prepareAbsolute
+	|mov ecx,0
+	|mov cx, word [codeMemory+(pc+1)]
+	|add ecx,aword codeMemory
+|.endmacro
+
+|.macro prepareAbsoluteX
+	|mov ecx,0
+	|mov cx, word [codeMemory+(pc+1)]
+	|add cl,X
+	|adc ch,0
+	|add ecx,aword codeMemory
+|.endmacro
+
+|.macro prepareAbsoluteY
+	|mov ecx,0
+	|mov cx, word [codeMemory+(pc+1)]
+	|add cl,Y
+	|adc ch,0
+	|add ecx,aword codeMemory
+|.endmacro
+
+|.macro prepareIndirectX
+	|mov ecx,0
+	|mov cl,byte [codeMemory+(pc+1)]
+	|add cl,X
+	|add ecx,aword codeMemory
+	|mov cx, word [ecx]
+	|and ecx, 0x0000FFFF
+	|add ecx,aword codeMemory
+|.endmacro
+
+|.macro prepareIndirectY
+	|mov ecx,0
+	|mov cl,byte [codeMemory+(pc+1)]
+	|add ecx,aword codeMemory
+	|mov cx, word [ecx]
+	|add cl,Y
+	|adc ch,0
+	|and ecx, 0x0000FFFF
+	|add ecx,aword codeMemory
+|.endmacro
+
+
+|.macro Immediate, opcode, reg
+	|addCycle 2
+	|x86RestoreCarry
+	|opcode reg,byte [codeMemory+(pc+1)]
+|.endmacro
+
+|.macro RegZeropage, opcode, reg
+	|prepareZeropage
+	|addCycle 3
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegZeropageX, opcode, reg
+	|prepareZeropageX
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegZeropageY, opcode, reg
+	|prepareZeropageY
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegAbsolute, opcode, reg
+	|prepareAbsolute
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegAbsoluteX, opcode, reg
+	|prepareAbsoluteX
+	|jc >1
+	|addCycle 1
+	|1:
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegAbsoluteY, opcode, reg
+	|prepareAbsoluteY
+	|jc >1
+	|addCycle 1
+	|1:
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegIndirectX, opcode, reg
+	|prepareIndirectX
+	|addCycle 6
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegIndirectY, opcode, reg
+	|prepareIndirectY
+	|jc >1
+	|addCycle 1
+	|1:
+	|addCycle 5
+	|x86RestoreCarry
+	|opcode reg,byte [ecx]
+|.endmacro
+
+
+|.macro ImmediateSub, opcode, reg
+	|addCycle 2
+	|x86RestoreBorrow
+	|opcode reg,byte [codeMemory+(pc+1)]
+|.endmacro
+
+|.macro RegZeropageSub, opcode, reg
+	|prepareZeropage
+	|addCycle 3
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegZeropageXSub, opcode, reg
+	|prepareZeropageX
+	|addCycle 4
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegZeropageYSub, opcode, reg
+	|prepareZeropageY
+	|addCycle 4
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegAbsoluteSub, opcode, reg
+	|prepareAbsolute
+	|addCycle 4
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegAbsoluteXSub, opcode, reg
+	|prepareAbsoluteX
+	|jc >1
+	|addCycle 1
+	|1:
+	|addCycle 4
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegAbsoluteYSub, opcode, reg
+	|prepareAbsoluteY
+	|jc >1
+	|addCycle 1
+	|1:
+	|addCycle 4
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegIndirectXSub, opcode, reg
+	|prepareIndirectX
+	|addCycle 6
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+|.macro RegIndirectYSub, opcode, reg
+	|prepareIndirectY
+	|jc >1
+	|addCycle 1
+	|1:
+	|addCycle 5
+	|x86RestoreBorrow
+	|opcode reg,byte [ecx]
+|.endmacro
+
+
+|.macro MemZeropage, opcode, reg
+	|prepareZeropage
+	|addCycle 3
+	|x86RestoreCarry
+	|opcode byte [ecx], reg
+|.endmacro
+
+|.macro MemZeropageX, opcode, reg
+	|prepareZeropageX
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode byte [ecx],reg
+|.endmacro
+
+|.macro MemZeropageY, opcode, reg
+	|prepareZeropageY
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode byte [ecx],reg
+|.endmacro
+
+|.macro MemAbsolute, opcode, reg
+	|prepareAbsolute
+	|addCycle 4
+	|x86RestoreCarry
+	|opcode byte [ecx],reg
+|.endmacro
+
+|.macro MemAbsoluteX, opcode, reg
+	|prepareAbsoluteX
+	|addCycle 5
+	|x86RestoreCarry
+	|opcode byte [ecx],reg
+|.endmacro
+
+|.macro MemAbsoluteY, opcode, reg
+	|prepareAbsoluteY
+	|addCycle 5
+	|x86RestoreCarry
+	|opcode byte [ecx],reg
+|.endmacro
+
+|.macro MemIndirectX, opcode, reg
+	|prepareIndirectX
+	|addCycle 6
+	|x86RestoreCarry
+	|opcode byte [ecx],reg
+|.endmacro
+
+|.macro MemIndirectY, opcode, reg
+	|prepareIndirectY
+	|addCycle 6
+	|x86RestoreCarry
+	|opcode byte [ecx],reg
+|.endmacro
+
+
+
+
+|.macro UnaryReg, opcode, reg
+	|addCycle 2
+	|x86RestoreCarry
+	|opcode reg,1
+|.endmacro
+
+|.macro UnaryZeropage, opcode
+	|prepareZeropage
+	|addCycle 5
+	|x86RestoreCarry
+	|opcode byte [ecx],1
+|.endmacro
+
+|.macro UnaryZeropageX, opcode
+	|prepareZeropageX
+	|addCycle 6
+	|x86RestoreCarry
+	|opcode byte [ecx],1
+|.endmacro
+
+|.macro UnaryAbsolute, opcode
+	|prepareAbsolute
+	|addCycle 6
+	|x86RestoreCarry
+	|opcode byte [ecx],1
+|.endmacro
+
+|.macro UnaryAbsoluteX, opcode
+	|prepareAbsoluteX
+	|addCycle 7
+	|x86RestoreCarry
+	|opcode byte [ecx],1
+|.endmacro
+
+//branches
+|.macro branch, flag, jmpType
+	|addCycle 2
+	|epilogue
+	|mov eax,pc+2
+	|cmp byte [&flag],1
+	|jmpType >1
+	|jmp >3
+	|1:
+	|mov ebx,0
+	|mov bl, byte [codeMemory+pc+1]
+	|bt bx,7
+	|jnc >2
+	|neg bl
+	|sub ax,bx
+	|jmp >3
+	|2:
+	|add ax,bx
+	|3:
+	|ret
+|.endmacro
+
+//push and pop
+|.macro pushReg, reg
+	|mov ecx,0
+	|mov cl, S
+	|add ecx,[&stackBase]
+	|mov byte [ecx],reg
+	|dec S
+|.endmacro
+
+|.macro popReg, reg
+	| inc S
+	| mov ecx,0
+	| mov cl,S
+	| add ecx,[&stackBase]
+	| mov reg,[ecx]
+|.endmacro
+
+|.macro pushWord, src
+	| dec S
+	| mov ecx,0
+	| mov cl, S
+	| add ecx,aword [&stackBase]
+	| mov word [ecx],src
+	| dec S
+|.endmacro
+
+
+|.macro popWord, des
+	| inc S
+	| mov ecx,0
+	| mov cl, S
+	| add ecx,aword [&stackBase]
+	| mov des,word [ecx]
+	| inc S
+|.endmacro
+
+//push flags
+
+//PHP
+|.macro PHP
+| addCycle 3
+
+| mov dh,0
+
+| mov dl,[&Carry_flag]
+| add dh,dl
+
+| mov dl,[&Zero_flag]
+| shl dl,1
+| add dh,dl
+
+| mov dl,[&Interrupt_flag]
+| shl dl,2
+| add dh,dl
+
+| mov dl,[&Decimal_flag]
+| shl dl,3
+| add ch,dl
+
+| mov dl,[&Break_flag]
+| shl dl,4
+| add dh,dl
+
+| mov dl,[&Overflow_flag]
+| shl dl,6
+| add dh,dl
+
+| mov dl,[&Sign_flag]
+| shl dl,7
+| add dh,dl
+
+
+|pushReg dh
+
+
+
+|.endmacro
+
+//PLP
+|.macro PLP
+
+| addCycle 4
+| popReg cl
+
+
+| bt cx,0
+| setc byte [&Carry_flag]
+
+| bt cx,1
+| setc byte [&Zero_flag]
+
+| bt cx,2
+| setc byte [&Interrupt_flag]
+
+| bt cx,3
+| setc byte [&Decimal_flag]
+
+| bt cx,4
+| setc byte [&Break_flag]
+
+| bt cx,6
+| setc byte [&Overflow_flag]
+
+| bt cx,7
+| setc byte [&Sign_flag]
+
+
+|.endmacro	
+
+
+//getOverflowFlag from x86
+
+
+|.macro getOverflowFlag
+	|seto byte [&Overflow_flag]
+|.endmacro	
+
+//getCarryFlag from x86
+
+|.macro getCarryFlag
+	|setc byte [&Carry_flag]
+|.endmacro
+
+//getBorrowFlag from x86
+|.macro getBorrowFlag
+	|setnc byte [&Carry_flag]
+|.endmacro	
+
+
+//getZeroFlag from x86
+
+|.macro getZeroFlag
+	|setz byte [&Zero_flag]
+|.endmacro
+
+//getSignFlag from x86
+|.macro getSignFlag
+	|sets byte [&Sign_flag]
+|.endmacro
+	
+|.macro x86RestoreCarry
+	|bt word [&Carry_flag],0
+|.endmacro
+
+|.macro x86RestoreBorrow
+	|bt word [&Carry_flag],0
+	|cmc
+|.endmacro
+
+			
+void CPU6502OpTranslator::doInterrupt(){
+	
+	cout<<"Interrupt Done"<<endl;
+	
+}
+
+void CPU6502OpTranslator::checkInterrupt(uint16_t pc,uint8_t* codeMemory){
+	interruptCount++;
+	if(interruptCount>COUNT_MAX){
+		|interrupt 0xFFFA
+		interruptCount=0;
+	}
+
+}
+void* CPU6502OpTranslator::translate(uint16_t pc,uint8_t *codeMemory){
+	 |.code
+	 |prologue
+	 bool isRunnning = true;
+	 stackBase = codeMemory+STACK_POSITION;
+	 while(isRunnning){
+		switch(codeMemory[pc]){
+			
+			//adc
+			case 0x69:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|Immediate adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x65:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropage adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x75:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageX adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x6D:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsolute adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x7D:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteX adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x79:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteY adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x61:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectX adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x71:
+				cout<<"code: adc "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectY adc,A
+				|getCarryFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			//end of adc	
+			
+			
+			//and
+			case 0x29:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|Immediate and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x25:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropage and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x35:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageX and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x2D:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsolute and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x3D:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteX and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x39:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteY and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x21:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectX and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x31:
+				cout<<"code: and "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectY and,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			//end of and
+
+			//cmp
+			case 0xc9:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|ImmediateSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xc5:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xd5:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageXSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xcD:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xdD:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteXSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xd9:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteYSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xc1:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectXSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xd1:
+				cout<<"code: cmp "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectYSub cmp,A
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			//end of cmp
+			
+			//CPX
+			case 0xE0:
+				cout<<"code: cpx "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|ImmediateSub cmp,X
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xE4:
+				cout<<"code: cpx "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageSub cmp,X
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xEC:
+				cout<<"code: cpx "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteSub cmp,X
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of CPX
+			
+			//CPY
+			case 0xc0:
+				cout<<"code: cpy "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|ImmediateSub cmp,Y
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xc4:
+				cout<<"code: cpy "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageSub cmp,Y
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xcC:
+				cout<<"code: cpy "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteSub cmp,Y
+				|getBorrowFlag
+				|getSignFlag
+				|getZeroFlag
+				
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of CPY
+			
+			
+			
+			//XOR
+			case 0x49:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|Immediate xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x45:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropage xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x55:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageX xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x4D:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsolute xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x5D:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteX xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x59:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteY xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x41:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectX xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x51:
+				cout<<"code: XOR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectY xor,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			//end of XOR
+			
+			//LDA
+			case 0xA9:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+
+				|Immediate mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				
+				break;
+			case 0xA5:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropage mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+			
+				break;
+			case 0xB5:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageX mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+			
+				break;
+			case 0xAD:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsolute mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				
+				break;
+			case 0xBD:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteX mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xB9:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteY mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				
+				break;
+			case 0xA1:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectX mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				
+				break;
+			case 0xB1:
+				cout<<"code: LDA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectY mov,A
+				|add A,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				
+				break;
+			//end of LDA
+			
+			//LDX
+			case 0xA2:
+				cout<<"code: LDX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|Immediate mov,X
+				|add X,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xA6:
+				cout<<"code: LDX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropage mov,X
+				|add X,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xB6:
+				cout<<"code: LDX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageY mov,X
+				|add X,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xAE:
+				cout<<"code: LDX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsolute mov,X
+				|add X,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xBE:
+				cout<<"code: LDX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteY mov,X
+				|add X,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			
+			//end of LDX
+			
+			//LDY
+			case 0xA0:
+				cout<<"code: LDY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|Immediate mov,Y
+				|add Y,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xA4:
+				cout<<"code: LDY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropage mov,Y
+				|add Y,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xB4:
+				cout<<"code: LDY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageX mov,Y
+				|add Y,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xAC:
+				cout<<"code: LDY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsolute mov,Y
+				|add Y,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xBC:
+				cout<<"code: LDY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteX mov,Y
+				|add Y,0
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			
+			//end of LDY
+			
+			//SBC
+			case 0xE9:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|ImmediateSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xE5:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xF5:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageXSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xED:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xFD:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteXSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xF9:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteYSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xE1:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectXSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xF1:
+				cout<<"code: SBC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectYSub sbb,A
+				|getBorrowFlag
+				|getOverflowFlag
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			//end of SBC
+			
+			//ORA
+			case 0x09:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				
+				|Immediate or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x05:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropage or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x15:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegZeropageX or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x0D:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsolute or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x1D:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteX or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x19:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegAbsoluteY or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x01:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectX or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x11:
+				cout<<"code: ORA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|RegIndirectY or,A
+				|getSignFlag
+				|getZeroFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			//end of ORA
+			
+			//STA
+			case 0x85:
+				cout<<"code: STA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemZeropage mov,A
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x95:
+				cout<<"code: STA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemZeropageX mov,A
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x8D:
+				cout<<"code: STA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemAbsolute mov,A
+				
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x9D:
+				cout<<"code: STA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemAbsoluteX mov,A
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x99:
+				cout<<"code: STA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemAbsoluteY mov,A
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x81:
+				cout<<"code: STA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemIndirectX mov,A
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x91:
+				cout<<"code: STA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemIndirectY mov,A
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			//end of STA	
+			
+			//STX
+			case 0x86:
+				cout<<"code: STX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemZeropage mov,X
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x96:
+				cout<<"code: STX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemZeropageY mov,X
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x8E:
+				cout<<"code: STX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemAbsolute mov,X
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of STX	
+			
+			//STY
+			case 0x84:
+				cout<<"code: STY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemZeropage mov,Y
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x94:
+				cout<<"code: STY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemZeropageX mov,Y
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x8C:
+				cout<<"code: STY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|MemAbsolute mov,Y
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of STY	
+			
+			//LSR
+			case 0x4A:
+				cout<<"code: LSR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg shr, A
+				|getZeroFlag
+				|getCarryFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			case 0x46:
+				cout<<"code: LSR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropage shr 
+				|getZeroFlag
+				|getCarryFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x56:
+				cout<<"code: LSR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropageX shr
+				|getZeroFlag
+				|getCarryFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x4E:
+				cout<<"code: LSR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsolute shr
+				|getZeroFlag
+				|getCarryFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x5E:
+				cout<<"code: LSR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsoluteX shr
+				|getZeroFlag
+				|getCarryFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of LSR
+			
+			//ASL
+			case 0x0A:
+				cout<<"code: ASL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg shl, A
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			case 0x06:
+				cout<<"code: ASL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropage shl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x16:
+				cout<<"code: ASL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropageX shl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x0E:
+				cout<<"code: ASL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsolute shl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x1E:
+				cout<<"code: ASL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsoluteX shl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of ASL
+			
+			
+			//ROL
+			case 0x2A:
+				cout<<"code: ROL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg rcl, A
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			case 0x26:
+				cout<<"code: ROL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropage rcl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x36:
+				cout<<"code: ROL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropageX rcl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x2E:
+				cout<<"code: ROL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsolute rcl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x3E:
+				cout<<"code: ROL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsoluteX rcl
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of ROL
+			
+			//ROR
+			case 0x6A:
+				cout<<"code: ROR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg rcr, A
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			case 0x66:
+				cout<<"code: ROR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropage rcr
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x76:
+				cout<<"code: ROR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropageX rcr
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x6E:
+				cout<<"code: ROR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsolute rcr
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0x7E:
+				cout<<"code: ROR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsoluteX rcr
+				|getZeroFlag
+				|getCarryFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of ROR
+			
+			//DEC
+			case 0xc6:
+				cout<<"code: DEC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropage sub
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xd6:
+				cout<<"code: DEC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropageX sub
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xce:
+				cout<<"code: DEC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsolute sub
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xdE:
+				cout<<"code: DEC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsoluteX sub
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of DEC
+			
+			//DEX
+			case 0xca:
+				cout<<"code: DEX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg sub,X
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of DEX
+			
+			
+			//DEY
+			case 0x88:
+				cout<<"code: DEY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg sub,Y
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of DEY
+			
+			
+			//INC
+			case 0xE6:
+				cout<<"code: INC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropage add
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xF6:
+				cout<<"code: INC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryZeropageX add
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0xEE:
+				cout<<"code: INC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsolute add
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			case 0xFE:
+				cout<<"code: INC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryAbsoluteX add
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+			//end of INC
+			
+			//INX
+			case 0xE8:
+				cout<<"code: INX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg add,X
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of INX
+			
+			
+			//INY
+			case 0xC8:
+				cout<<"code: INY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|UnaryReg add,Y
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of INY
+			
+			//NOP
+			case 0xEA:
+				cout<<"code: NOP "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of NOP
+			
+			//BIT
+			case 0x24:
+				cout<<"code: BIT "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 3
+				|mov dl,A
+				|prepareZeropage
+				|and dl,byte [ecx]
+				|setz byte [&Zero_flag]
+				|bt ecx,6
+				|setc byte [&Overflow_flag]
+				|bt ecx,7
+				|setc byte [&Sign_flag]
+				checkInterrupt( pc,codeMemory);
+				pc+=2;
+				break;
+			case 0x2C:
+				cout<<"code: BIT "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				
+				|addCycle 4
+				|mov dl,A
+				|prepareAbsolute
+				|and dl,byte [ecx]
+				|setz byte [&Zero_flag]
+				|bt ecx,6
+				|setc byte [&Overflow_flag]
+				|bt ecx,7
+				|setc byte [&Sign_flag]
+				checkInterrupt( pc,codeMemory);
+				pc+=3;
+				break;
+		
+			//end of BIT
+			
+			//BRK
+			case 0x00:
+				cout<<"code: BRK "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				| addCycle 4
+				| BrkInterrupt
+				isRunnning=false;
+				break;
+			//end of BRK
+			
+			//RTI
+			case 0x40:
+				cout<<"code: RTI "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				| addCycle 6
+				| PLP
+				| popWord cx
+				| epilogue
+				| mov ax,cx
+				| ret
+				
+				isRunnning=false;
+				break;
+			//end of RTI
+			
+			//JSR
+			case 0x20:
+				cout<<"code: JSR "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				| addCycle 6
+				| pushWord pc+2
+				| epilogue
+				| mov ax, word [codeMemory+(pc+1)]
+				| ret
+				isRunnning=false;
+				break;
+			//end of JSR
+			
+			
+			//RTS
+			case 0x60:
+				cout<<"code: RTS "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				| addCycle 6
+				| popWord cx
+				| epilogue
+				| mov ax,cx
+				| add ax,1
+				| ret
+				isRunnning=false;
+				break;
+			//end of RTS
+			
+			//SEC
+			case 0x38:
+				cout<<"code: SEC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov byte [&Carry_flag],1			
+				pc+=1;
+				break;
+			//end of SEC
+			
+			//SED
+			case 0xF8:
+				cout<<"code: SEE "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov byte [&Decimal_flag],1
+				pc+=1;
+				break;
+			//end of SED
+			
+			//SEI
+			case 0x78:
+				cout<<"code: SEI "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov byte [&Interrupt_flag],1
+				pc+=1;
+				break;
+			//end of SEI
+			
+			
+			
+			
+			//BCC
+			case 0x90:
+			cout<<"code: BCC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Carry_flag, jne
+				isRunnning=false;
+				break;
+			//end of BCC
+			
+			//BCS
+			case 0xB0:
+			cout<<"code: BCS "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Carry_flag, je
+				isRunnning=false;
+				break;
+			//end of BCS
+			
+			//BEQ
+			case 0xF0:
+			cout<<"code: BEQ "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Zero_flag, je
+				isRunnning=false;
+				break;
+			//end of BMI
+			
+			
+			//BMI
+			case 0x30:
+				cout<<"code: BMI "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Sign_flag, je
+				isRunnning=false;
+				break;
+			//end of BMI
+			
+			//BNE
+			case 0xD0:
+			cout<<"code: BNE "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Zero_flag, jne
+				isRunnning=false;
+				break;
+			//end of  BNE
+			
+			//BPL
+			case 0x10:
+			cout<<"code: BPL "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Sign_flag, jne
+				isRunnning=false;
+				break;
+			//end of  BPL
+			
+			//BVC
+			case 0x50:
+				cout<<"code: BVC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Overflow_flag, jne
+				isRunnning=false;
+				break;
+			//end of   BVC
+			
+			//BVS
+			case 0x70:
+			cout<<"code: BVS "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|branch Overflow_flag, je
+				isRunnning=false;
+				break;
+			//end of  BVS
+			
+			//CLC
+			case 0x18:
+			cout<<"code: CLC "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov byte [&Carry_flag],0
+				pc+=1;
+				break;
+			//end of CLC
+			
+			//CLD
+			case 0xd8:
+			cout<<"code: CLD "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov byte [&Decimal_flag],0
+				pc+=1;
+				break;
+			//end of CLD
+			
+			//CLI
+			case 0x58:
+			cout<<"code: CLI "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov byte [&Interrupt_flag],0
+				pc+=1;
+				break;
+			//end of CLI
+			
+			//CLV
+			case 0xB8:
+				cout<<"code: CLV "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				| mov byte [&Overflow_flag],0
+				pc+=1;
+				break;
+			//end of CLV
+			
+			//JMP
+			case 0x4C:
+				cout<<"code: JMP "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 3
+				|epilogue
+				|mov ax,word [codeMemory+(pc+1)]
+				|ret
+				isRunnning =false;
+				break;
+			
+			case 0x6C:
+				cout<<"code: JMP "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 5
+				|epilogue
+				|mov ecx,0
+				|mov cx,word [codeMemory+(pc+1)]
+				|add ecx,codeMemory
+				|mov ax, word [ecx]
+				|ret
+				isRunnning =false;
+				break;
+			//end of JMP
+			
+			//PHA
+			case 0x48:
+				cout<<"code: PHA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 3
+				|pushReg A
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of PHA
+			
+			//PLA
+			case 0x68:
+				cout<<"code: PLA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 4
+				|popReg A
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of PLA
+			
+			
+			//PHP
+			case 0x08:
+				cout<<"code: PHP "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				| PHP
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of PHP
+			
+			//PLP
+			case 0x28:
+				cout<<"code: PLP "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				| PLP
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of PLP
+			
+			//TAX
+			case 0xAA:
+				cout<<"code: TAX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov X,A
+				|add X,0
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of TAX
+			
+			//TAY
+			case 0xA8:
+				cout<<"code: TAY "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov Y,A
+				|add Y,0
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of TAY
+			
+			//TXA
+			case 0x8A:
+				cout<<"code: TXA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov A,X
+				|add A,0
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of TXA
+			
+			//TYA
+			case 0x98:
+				cout<<"code: TYA "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov A,Y
+				|add A,0
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of TYA
+			
+			//TXS
+			case 0x9A:
+				cout<<"code: TXS "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov S,X
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of TXS
+			
+			//TSX
+			case 0xBA:
+				cout<<"code: TSX "<<"0x"<<hex<<(int)codeMemory[pc]<<" 0x"<<hex<<(int)codeMemory[pc+1]<<" 0x"<<hex<<(int)codeMemory[pc+2]<<" PC: "<<"0x"<<hex<<pc<<endl;
+				|addCycle 2
+				|mov X,S
+				|add X,0
+				|getZeroFlag
+				|getSignFlag
+				checkInterrupt( pc,codeMemory);
+				pc+=1;
+				break;
+			//end of TSX
+			
+			default:
+				cout<<(int)codeMemory[pc]<<endl;
+				cout<<"unknow opcode"<<endl;
+				//|epilogue
+				//|ret
+				isRunnning=false;
+		}
+	 
+	 }
+	
+	 return getBlock();
+	
+}
+void* CPU6502OpTranslator::getBlock()
+{
+  size_t sz;
+  void* buf;
+  dasm_link(&d, &sz);
+  buf = VirtualAlloc(0, sz, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  dasm_encode(&d, buf);
+  {DWORD dwOld; VirtualProtect(buf, sz, PAGE_EXECUTE_READ, &dwOld); }
+  return buf;
+}
+CPU6502OpTranslator::CPU6502OpTranslator() {
+	cycles=0;
+	interruptCount=0;
+	pageBoundary=0xFFFF;
+	A_backup=0;
+	X_backup=0;
+	Y_backup=0;
+	S_backup=0xFF;
+	Carry_flag=0;
+	Zero_flag=0;
+	Interrupt_flag=0;
+	Decimal_flag=0;
+	Break_flag=0;
+	Overflow_flag=0;
+	Sign_flag=0;
+	
+}
+void CPU6502OpTranslator::setUp() {
+	npc = 8;
+    nextpc = 0;
+    dasm_init(&d, DASM_MAXSECTION);
+	void* labels[lbl__MAX];
+    dasm_setupglobal(&d, labels, lbl__MAX);
+    dasm_setup(&d, bf_actions);
+    dasm_growpc(&d, npc);
+	Dst = &d;
+
+}
+void CPU6502OpTranslator::clear() {
+   dasm_free(&d);
+}
+CPU6502OpTranslator::CPU6502OpTranslator(const CPU6502OpTranslator& orig) {
+}
+
+CPU6502OpTranslator::~CPU6502OpTranslator() {
+	
+	
+}
+void CPU6502OpTranslator::outPutAddress() {
+	
+}
+
